@@ -1,0 +1,15 @@
+.{
+    .name = .merkle_tree_zig,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.0",
+    .dependencies = .{},
+    .paths = .{
+        "src",
+        "examples",
+        "benchmark",
+        "build.zig",
+        "build.zig.zon",
+        "README.md",
+    },
+    .fingerprint = 0xd5f97f3240803d09,
+}

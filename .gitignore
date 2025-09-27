@@ -1,0 +1,30 @@
+# Zig build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Nix
+.direnv/
+result
+result-*
+
+# Temporary files
+*.tmp
+*.temp
+*.log

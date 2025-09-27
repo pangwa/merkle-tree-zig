@@ -4,6 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const zabi_module = b.dependency("zabi", .{}).module("zabi");
+
     // Create a module for the merkle tree library
     const merkle_module = b.addModule("merkle-tree-zig", .{
         .root_source_file = b.path("src/lib.zig"),
@@ -21,6 +23,7 @@ pub fn build(b: *std.Build) void {
 
     // Import the module into the executable
     exe.root_module.addImport("merkle-tree-zig", merkle_module);
+    exe.root_module.addImport("zabi", zabi_module);
 
     // Install the executable
     b.installArtifact(exe);
@@ -40,6 +43,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+
+    tests.root_module.addImport("zabi", zabi_module);
 
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run tests");

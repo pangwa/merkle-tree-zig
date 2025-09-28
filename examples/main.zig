@@ -190,4 +190,12 @@ pub fn main() !void {
     std.debug.print("Merkle Root (hex): {s}\n", .{root});
 
     defer tree.deinit();
+
+      // Create or open a file for writing
+    var file = try std.fs.cwd().createFile("data.tree.json", .{});
+    defer file.close();
+    var buffer: [1024]u8 = undefined;
+    var writer = file.writer(&buffer);
+
+    try tree.dumpJson(allocator, &writer.interface);
 }

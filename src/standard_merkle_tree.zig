@@ -19,6 +19,21 @@ const HashedValues = struct {
 
     const Self = @This();
 
+    pub fn dupe(self: *const Self, allocator: std.mem.Allocator) !Self {
+        const value = try dupeNestedSlice(allocator, self.value);
+        errdefer {
+            for (value) |v| allocator.free(v);
+            allocator.free(value);
+        }
+        const hash = try allocator.dupe(u8, self.hash);
+
+        return Self{
+            .value = value,
+            .hash = hash,
+            .value_index = self.value_index,
+        };
+    }
+
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         for (0..self.value.len) |i| {
             allocator.free(self.value[i]);
@@ -119,7 +134,55 @@ pub const StandardMerkleTree = struct {
     pub fn treeNodes(self: *Self) [][]const u8 {
         return self.tree.tree_nodes;
     }
+
+    pub fn dumpJson(self: *Self, allocator: std.mem.Allocator, writer: *std.Io.Writer) !void {
+        const r = try hashToHex(allocator, self.root());
+        defer allocator.free(r);
+
+        var renderedValues = try renderHashedValues(allocator, self.values.items);
+        defer {
+            for (0..renderedValues.items.len) |i| {
+                renderedValues.items[i].deinit(allocator);
+            }
+            renderedValues.deinit(allocator);
+        }
+
+        const fmt = std.json.fmt(.{
+            .format = self.format,
+            .values = renderedValues.items,
+            .leaf_encoding = self.leaf_encoding,
+            .root = r,
+        }, .{ .whitespace = .indent_2 });
+          // Create or open a file for writing
+        var file = try std.fs.cwd().createFile("output.json", .{});
+        defer file.close();
+        // var buffer: [1024]u8 = undefined;
+        // var writer = file.writer(&buffer);
+        try fmt.format(writer);
+        try writer.flush();
+    }
 };
+
+fn renderHashedValues(allocator: std.mem.Allocator, hv: []HashedValues) !std.ArrayList(HashedValues){
+    var renderedValues = std.ArrayList(HashedValues){};
+    errdefer {
+        for (0..renderedValues.items.len) |i| {
+            renderedValues.items[i].deinit(allocator);
+        }
+        renderedValues.deinit(allocator);
+    }
+
+    for (hv) |h| {
+        var item = try h.dupe(allocator);
+        errdefer item.deinit(allocator);
+        const hash = try hashToHex(allocator, item.hash);
+        allocator.free(item.hash);
+        item.hash = hash;
+
+        try renderedValues.append(allocator, item);
+    }
+    return renderedValues;
+}
 
 fn dupeNestedSlice(allocator: std.mem.Allocator, original: []const []const u8) ![][]const u8 {
     // Allocate memory for the outer slice (array of slices)

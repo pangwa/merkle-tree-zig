@@ -11,6 +11,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/lib.zig"),
     });
 
+    merkle_module.addImport("merkle-tree-zig", merkle_module);
+    merkle_module.addImport("zabi", zabi_module);
+
     // Create the example executable
     const exe = b.addExecutable(.{
         .name = "examples",

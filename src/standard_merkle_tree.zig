@@ -16,6 +16,7 @@ pub const StandardMerkleTree = struct {
     tree: core.MerkleTree,
 
     pub fn of(allocator: std.mem.Allocator, leaves: []const []const LeafValue, leave_encoding: [][]const u8) !core.MerkleTree {
+        var start = try std.time.Instant.now();
         const param_types = try allocator.alloc(ParamType, leave_encoding.len);
         var allocated_param_types: usize = 0;
         defer {
@@ -38,9 +39,9 @@ pub const StandardMerkleTree = struct {
             }
             allocator.free(encoded_leaves);
         }
+
         for (leaves, 0..) |leaf, i| {
-            const hash = try standardLeafHash(allocator, leaf, param_types);
-            encoded_leaves[i] = try allocator.dupe(u8, &hash);
+            encoded_leaves[i] = try standardLeafHash(allocator, leaf, param_types);
             allocated_count += 1;
         }
 
@@ -51,9 +52,11 @@ pub const StandardMerkleTree = struct {
             }
         }.lessThan);
 
+        start = try std.time.Instant.now();
         var tree_builder = core.MerkleTreeBuilder.init(allocator);
         defer tree_builder.deinit();
         try tree_builder.addBatchData(encoded_leaves);
+
         const tree = try tree_builder.build();
         return tree;
     }
@@ -96,7 +99,7 @@ fn parseSimpleValue(value: []const u8, param_type: ParamType) !AbiEncodedValues 
     };
 }
 
-fn standardLeafHash(allocator: std.mem.Allocator, leaf: []const LeafValue, param_types: []const ParamType) ![32]u8 {
+fn standardLeafHash(allocator: std.mem.Allocator, leaf: []const LeafValue, param_types: []const ParamType) ![]u8 {
     if (leaf.len != param_types.len) {
         std.debug.print("leaf length {} does not match param_types length {}\n", .{ leaf.len, param_types.len });
         return error.InvalidValueCount;
@@ -109,11 +112,13 @@ fn standardLeafHash(allocator: std.mem.Allocator, leaf: []const LeafValue, param
     const leaf_encoded = try encodeAbiParametersValues(allocator, values);
     defer allocator.free(leaf_encoded);
 
-    var hash_result: [32]u8 = undefined;
+    var hash_result = allocator.alloc(u8, 32) catch {
+        return error.OutOfMemory;
+    };
 
     // Note: double hash to prevent second pre-image attack
-    std.crypto.hash.sha3.Keccak256.hash(leaf_encoded, &hash_result, .{});
-    std.crypto.hash.sha3.Keccak256.hash(&hash_result, &hash_result, .{});
+    std.crypto.hash.sha3.Keccak256.hash(leaf_encoded, hash_result[0..32], .{});
+    std.crypto.hash.sha3.Keccak256.hash(hash_result, hash_result[0..32], .{});
     return hash_result;
 }
 
@@ -147,7 +152,8 @@ test "standard leaf hash" {
     const leaf = &[_]LeafValue{ "0x1111111111111111111111111111111111111111", "5000000000000000000" };
     const param_types = &[_]ParamType{ .address, .{ .uint = 256 } };
     const hash = try standardLeafHash(testing.allocator, leaf, param_types);
-    const hex = try hashToHex(testing.allocator, &hash);
+    defer testing.allocator.free(hash);
+    const hex = try hashToHex(testing.allocator, hash);
     defer testing.allocator.free(hex);
     try testing.expectEqualStrings("eb02c421cfa48976e66dfb29120745909ea3a0f843456c263cf8f1253483e283", hex);
 }

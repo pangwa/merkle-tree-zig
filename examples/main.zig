@@ -185,7 +185,7 @@ pub fn main() !void {
 
     const end2 = try std.time.Instant.now();
     std.debug.print("built in {} ms\n", .{ @divTrunc(end2.since(start2), std.time.ns_per_ms) });
-    const root = try merkle.hashToHex(allocator, tree.root);
+    const root = try merkle.hashToHex(allocator, tree.root());
     defer allocator.free(root);
     std.debug.print("Merkle Root (hex): {s}\n", .{root});
 

@@ -12,10 +12,42 @@ const TokensTag = zabi.human_readable.TokensTag;
 
 const LeafValue = []const u8;
 
-pub const StandardMerkleTree = struct {
-    tree: core.MerkleTree,
+const HashedValues = struct {
+    value: [] const LeafValue,
+    value_index: usize,
+    hash: []const u8,
 
-    pub fn of(allocator: std.mem.Allocator, leaves: []const []const LeafValue, leave_encoding: [][]const u8) !core.MerkleTree {
+    const Self = @This();
+
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        for (0..self.value.len) |i| {
+            allocator.free(self.value[i]);
+        }
+        allocator.free(self.value);
+        allocator.free(self.hash);
+    }
+};
+
+pub const StandardMerkleTree = struct {
+    format: []u8,
+    tree: core.MerkleTree,
+    values: std.ArrayList(HashedValues),
+    leaf_encoding: [][] const u8,
+    allocator: std.mem.Allocator,
+
+    const Self = @This();
+
+    pub fn deinit(self: *Self) void {
+        self.allocator.free(self.format);
+        self.tree.deinit();
+
+        for(0..self.values.items.len) |i| {
+            self.values.items[i].deinit(self.allocator);
+        }
+        self.values.deinit(self.allocator);
+    }
+
+    pub fn of(allocator: std.mem.Allocator, leaves: []const []const LeafValue, leave_encoding: [][]const u8) ! StandardMerkleTree{
         var start = try std.time.Instant.now();
         const param_types = try allocator.alloc(ParamType, leave_encoding.len);
         var allocated_param_types: usize = 0;
@@ -31,36 +63,83 @@ pub const StandardMerkleTree = struct {
             allocated_param_types += 1;
         }
 
-        const encoded_leaves = try allocator.alloc([]const u8, leaves.len);
-        var allocated_count: usize = 0;
-        defer {
-            for (encoded_leaves[0..allocated_count]) |el| {
-                allocator.free(el);
+        var values = std.ArrayList(HashedValues){};
+        // defer values.deinit(allocator);
+        errdefer {
+            for (0..values.items.len) |i| {
+                values.items[i].deinit(allocator);
             }
-            allocator.free(encoded_leaves);
+            values.deinit(allocator);
         }
 
         for (leaves, 0..) |leaf, i| {
-            encoded_leaves[i] = try standardLeafHash(allocator, leaf, param_types);
-            allocated_count += 1;
+            const hash = try standardLeafHash(allocator, leaf, param_types);
+            try values.append(allocator, .{
+                .value = try dupeNestedSlice(allocator, leaf),
+                .value_index = i,
+                .hash = hash,
+            });
         }
 
-        std.mem.sort([]const u8, encoded_leaves, {}, struct {
-            fn lessThan(context: void, a: []const u8, b: []const u8) bool {
+        std.mem.sort(HashedValues, values.items[0..], {}, struct {
+            fn lessThan(context: void, a: HashedValues, b: HashedValues) bool {
                 _ = context;
-                return std.mem.order(u8, a, b) == .lt;
+                return std.mem.order(u8, a.hash, b.hash) == .lt;
             }
         }.lessThan);
 
+        var encoded_leaves = std.ArrayList([] const u8){};
+        defer encoded_leaves.deinit(allocator);
+
+        for (0..values.items.len) |i| {
+            values.items[i].value_index = i;
+            try encoded_leaves.append(allocator, values.items[i].hash);
+        }
+
         start = try std.time.Instant.now();
+
         var tree_builder = core.MerkleTreeBuilder.init(allocator);
         defer tree_builder.deinit();
-        try tree_builder.addBatchData(encoded_leaves);
+        try tree_builder.addBatchData(encoded_leaves.items);
 
         const tree = try tree_builder.build();
-        return tree;
+        return StandardMerkleTree {
+            .allocator = allocator,
+            .format = try allocator.dupe(u8, "standard-v1"),
+            .tree = tree,
+            .values = values,
+            .leaf_encoding = leave_encoding,
+        };
+    }
+
+    pub fn root(self: *Self) []const u8 {
+        return self.tree.root;
+    }
+
+    pub fn treeNodes(self: *Self) [][]const u8 {
+        return self.tree.tree_nodes;
     }
 };
+
+fn dupeNestedSlice(allocator: std.mem.Allocator, original: []const []const u8) ![][]const u8 {
+    // Allocate memory for the outer slice (array of slices)
+    const new_outer_slice = try allocator.alloc([]const u8, original.len);
+    errdefer allocator.free(new_outer_slice); // Clean up if errors occur during nested allocation
+
+    // Iterate and duplicate each inner slice
+    for (original, 0..) |inner_slice, i| {
+        // Allocate memory for the current inner slice and copy its contents
+        const new_inner_slice = try allocator.dupe(u8, inner_slice);
+        errdefer {
+            // Free previously duplicated inner slices if an error occurs
+            for (new_outer_slice[0..i]) |prev_inner| allocator.free(prev_inner);
+            allocator.free(new_outer_slice);
+        }
+        new_outer_slice[i] = new_inner_slice;
+    }
+
+    return new_outer_slice;
+}
 
 fn parseSimpleValue(value: []const u8, param_type: ParamType) !AbiEncodedValues {
     return switch (param_type) {
@@ -122,7 +201,7 @@ fn standardLeafHash(allocator: std.mem.Allocator, leaf: []const LeafValue, param
     return hash_result;
 }
 
-fn buildTreeFromCharacters(allocator: std.mem.Allocator, s: []const u8) !core.MerkleTree {
+fn buildTreeFromCharacters(allocator: std.mem.Allocator, s: []const u8) !StandardMerkleTree{
     var arena = std.heap.ArenaAllocator.init(allocator);
     var local_alloc = arena.allocator();
     defer arena.deinit(); // Frees everything at once
@@ -167,7 +246,7 @@ test "create standard merkle tree using of" {
     var tree = try StandardMerkleTree.of(testing.allocator, leaves[0..], leave_encoding[0..]);
     defer tree.deinit();
 
-    const root = try hashToHex(testing.allocator, tree.root);
+    const root = try hashToHex(testing.allocator, tree.root());
     defer testing.allocator.free(root);
 
     try testing.expectEqualSlices(u8, "d4dee0beab2d53f2cc83e567171bd2820e49898130a22622b10ead383e90bd77", root);
@@ -177,9 +256,9 @@ test "create standard merkle tree using of" {
         "eb02c421cfa48976e66dfb29120745909ea3a0f843456c263cf8f1253483e283",
         "b92c48e9d7abe27fd8dfd6b5dfdbfb1c9a463f80c712b66f3a5180a090cccafc",
     };
-    try testing.expectEqual(3, tree.tree_nodes.len);
+    try testing.expectEqual(3, tree.treeNodes().len);
 
-    for (expected_nodes, tree.tree_nodes) |expected, actual| {
+    for (expected_nodes, tree.treeNodes()) |expected, actual| {
         const actual_hex = try hashToHex(testing.allocator, actual);
         defer testing.allocator.free(actual_hex);
         try testing.expectEqualSlices(u8, expected, actual_hex);
@@ -191,14 +270,14 @@ test "from characters" {
     var tree = try buildTreeFromCharacters(testing.allocator, s);
     defer tree.deinit();
 
-    const root = try hashToHex(testing.allocator, tree.root);
+    const root = try hashToHex(testing.allocator, tree.root());
     defer testing.allocator.free(root);
     try testing.expectEqualStrings("6deb52b5da8fd108f79fab00341f38d2587896634c646ee52e49f845680a70c8", root);
 
-    try testing.expectEqual(11, tree.tree_nodes.len);
+    try testing.expectEqual(11, tree.treeNodes().len);
 
     const expected_nodes = [_][]const u8{ "6deb52b5da8fd108f79fab00341f38d2587896634c646ee52e49f845680a70c8", "52426e0f1f65ff7e209a13b8c29cffe82e3acaf3dad0a9b9088f3b9a61a929c3", "fd3cf45654e88d1cc5d663578c82c76f4b5e3826bacaa1216441443504538f51", "8076923e76cf01a7c048400a2304c9a9c23bbbdac3a98ea3946340fdafbba34f", "965b92c6cf08303cc4feb7f3e0819c436c2cec17c6f0688a6af139c9a368707c", "eba909cf4bb90c6922771d7f126ad0fd11dfde93f3937a196274e1ac20fd2f5b", "c62a8cfa41edc0ef6f6ae27a2985b7d39c7fea770787d7e104696c6e81f64848", "9cf5a63718145ba968a01c1d557020181c5b252f665cf7386d370eddb176517b", "9c15a6a0eaeed500fd9eed4cbeab71f797cefcc67bfd46683e4d2e6ff7f06d1c", "9a4f64e953595df82d1b4f570d34c4f4f0cfaf729a61e9d60e83e579e1aa283e", "19ba6c6333e0e9a15bf67523e0676e2f23eb8e574092552d5e888c64a4bb3681" };
-    for (expected_nodes, tree.tree_nodes) |en, tn| {
+    for (expected_nodes, tree.treeNodes()) |en, tn| {
         const tn_hex = try hashToHex(testing.allocator, tn);
         defer testing.allocator.free(tn_hex);
         try testing.expectEqualStrings(en[0..], tn_hex[0..]);

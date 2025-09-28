@@ -34,6 +34,12 @@ pub const MerkleTreeBuilder = struct {
         try self.leaves.append(self.allocator, data_copy);
     }
 
+    pub fn addBatchData(self: *Self, data: [][]const u8) !void {
+        for (data) |d| {
+            try self.addData(d);
+        }
+    }
+
     /// Build the Merkle Tree and return it
     pub fn build(self: *Self) !MerkleTree {
         if (self.leaves.items.len == 0) {

@@ -160,6 +160,10 @@ pub const StandardMerkleTree = struct {
         return self.tree.tree_nodes;
     }
 
+    pub fn getProofByIndex(self: *Self, allocator: std.mem.Allocator, leaf_index: usize) ![][]const u8 {
+        return try self.tree.getProof(allocator, leaf_index);
+    }
+
     /// Write the JSON representation of the merkle tree to any writer.
     /// Caller owns the writer (file, fixed buffer, ArrayList writer, etc.).
     /// No implicit file creation is performed here.
@@ -484,6 +488,16 @@ test "create standard merkle tree using of" {
     }
 }
 
+test "root" {
+    const s = "abc";
+    var tree = try buildTreeFromCharacters(testing.allocator, s);
+    defer tree.deinit();
+    const hex = try hashToHex(testing.allocator, tree.root());
+    defer testing.allocator.free(hex);
+
+    try testing.expectEqualStrings("f2129b5a697531ef818f644564a6552b35c549722385bc52aa7fe46c0b5f46b1", hex);
+}
+
 test "from characters" {
     const s = "abcdef";
     var tree = try buildTreeFromCharacters(testing.allocator, s);
@@ -556,4 +570,31 @@ test "load_json" {
 
     try testing.expectEqualSlices(u8, tree.root(), tree2.root());
     try testing.expectEqual(tree.values.len, tree2.values.len);
+}
+
+test "get proof" {
+    const s = "abcdef";
+    var tree = try buildTreeFromCharacters(testing.allocator, s);
+    defer tree.deinit();
+
+    var proof = try tree.getProofByIndex(testing.allocator, 6);
+    defer {
+        for (0..proof.len) |i| {
+            testing.allocator.free(proof[i]);
+        }
+        testing.allocator.free(proof);
+    }
+
+    try testing.expectEqual(2, proof.len);
+
+    const expected_proof = [_][]const u8{
+        "eba909cf4bb90c6922771d7f126ad0fd11dfde93f3937a196274e1ac20fd2f5b",
+        "52426e0f1f65ff7e209a13b8c29cffe82e3acaf3dad0a9b9088f3b9a61a929c3",
+    };
+
+    for (expected_proof, proof) |ep, p| {
+        const p_hex = try hashToHex(testing.allocator, p);
+        defer testing.allocator.free(p_hex);
+        try testing.expectEqualStrings(ep[0..], p_hex[0..]);
+    }
 }

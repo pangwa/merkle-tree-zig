@@ -15,6 +15,17 @@ const StringHashMap = std.StringHashMap;
 
 const LeafValue = []const u8;
 
+const HashOnlyValue = struct {
+    value_index: usize,
+    hash: []const u8,
+
+    const Self = @This();
+
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        allocator.free(self.hash);
+    }
+};
+
 const HashedValues = struct {
     value: [] const LeafValue,
     value_index: usize,
@@ -97,13 +108,13 @@ pub const StandardMerkleTree = struct {
         errdefer hash_lookup.deinit();
 
         var hash_keys = std.ArrayList([]const u8){};
-        for(values.items) |v| {
+        for(values.items, 0..) |v, i| {
             const hex = try hashToHex(allocator, v.hash);
             {
                 errdefer allocator.free(hex);
                 try hash_keys.append(allocator, hex);
             }
-            try hash_lookup.put(hex, v.value_index);
+            try hash_lookup.put(hex, i);
         }
 
          return . {
@@ -118,62 +129,73 @@ pub const StandardMerkleTree = struct {
     }
 
     pub fn of(allocator: std.mem.Allocator, leaves: []const []const LeafValue, leave_encoding: [][]const u8) ! StandardMerkleTree{
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        var local_allocator = arena.allocator();
+        defer arena.deinit();
+
         var start = try std.time.Instant.now();
-        const param_types = try allocator.alloc(ParamType, leave_encoding.len);
-        var allocated_param_types: usize = 0;
-        defer {
-            for (param_types[0..allocated_param_types]) |pt| {
-                pt.freeArrayParamType(allocator);
-            }
-            allocator.free(param_types);
-        }
+        const param_types = try local_allocator.alloc(ParamType, leave_encoding.len);
         for (leave_encoding, 0..) |enc, i| {
             const token_tag = TokensTag.typesKeyword(enc) orelse return error.InvalidTokenType;
             param_types[i] = zabi.abi.param_type.ParamType.fromHumanReadableTokenTag(token_tag) orelse return error.InvalidParamType;
-            allocated_param_types += 1;
         }
 
-        var values = std.ArrayList(HashedValues){};
-        // defer values.deinit(allocator);
-        errdefer {
-            for (0..values.items.len) |i| {
-                values.items[i].deinit(allocator);
-            }
-            values.deinit(allocator);
-        }
+        var values = std.ArrayList(HashOnlyValue){};
+        var leave_hashes = std.ArrayList([]const u8){};
 
+        // first pass, values in the original order
         for (leaves, 0..) |leaf, i| {
-            const hash = try standardLeafHash(allocator, leaf, param_types);
-            try values.append(allocator, .{
-                .value = try dupeNestedSlice(allocator, leaf),
+            const hash = try standardLeafHash(local_allocator, leaf, param_types);
+            try values.append(local_allocator, .{
                 .value_index = i,
                 .hash = hash,
             });
+            try leave_hashes.append(local_allocator, hash);
         }
 
-        std.mem.sort(HashedValues, values.items[0..], {}, struct {
-            fn lessThan(context: void, a: HashedValues, b: HashedValues) bool {
+        // second pass, values in the sorted order
+        std.mem.sort(HashOnlyValue, values.items[0..], {}, struct {
+            fn lessThan(context: void, a: HashOnlyValue, b: HashOnlyValue) bool {
                 _ = context;
                 return std.mem.order(u8, a.hash, b.hash) == .lt;
             }
         }.lessThan);
 
         var encoded_leaves = std.ArrayList([] const u8){};
-        defer encoded_leaves.deinit(allocator);
 
         for (0..values.items.len) |i| {
-            values.items[i].value_index = i;
-            try encoded_leaves.append(allocator, values.items[i].hash);
+            try encoded_leaves.append(local_allocator, values.items[i].hash);
         }
 
         start = try std.time.Instant.now();
 
-        var tree_builder = core.MerkleTreeBuilder.init(allocator);
-        defer tree_builder.deinit();
-        try tree_builder.addBatchData(encoded_leaves.items);
+        var tree: core.MerkleTree = undefined;
+        {
+            var tree_builder = core.MerkleTreeBuilder.init(allocator);
+            defer tree_builder.deinit();
+            try tree_builder.addBatchData(encoded_leaves.items);
+
+            tree = try tree_builder.build();
+        }
+
+        const tree_size = tree.tree_nodes.len;
+        var values_original = std.ArrayList(HashedValues){};
+        for (leaves, 0..) |leaf, i| {
+            const hash = try allocator.dupe(u8, leave_hashes.items[i]);
+            errdefer allocator.free(hash);
+            try values_original.append(allocator, .{
+                .value = try dupeNestedSlice(allocator, leaf),
+                .value_index = i,
+                .hash = hash,
+            });
+        }
+
+        for (values.items, 0..) |hv, i| {
+            values_original.items[hv.value_index].value_index = tree_size - i - 1;
+        }
+
         const leave_encoding_copy = try dupeNestedSlice(allocator, leave_encoding);
-        var tree = try tree_builder.build();
-        return Self.init(allocator, &tree, &values, leave_encoding_copy);
+        return Self.init(allocator, &tree, &values_original, leave_encoding_copy);
     }
 
     pub fn root(self: *Self) []const u8 {
@@ -185,8 +207,21 @@ pub const StandardMerkleTree = struct {
     }
 
     pub fn getProofByIndex(self: *Self, allocator: std.mem.Allocator, leaf_index: usize) ![][]const u8 {
-        return try self.tree.getProof(allocator, leaf_index);
+        if (leaf_index >= self.values.len) {
+            return error.InvalidLeafIndex;
+        }
+        const v = self.values[leaf_index];
+        return try self.tree.getProof(allocator, v.value_index);
     }
+
+    pub fn getProofByHash(self: *Self, allocator: std.mem.Allocator, hash: []const u8) ![][]const u8 {
+        const item = self.hash_lookup.get(hash);
+        if (item == null) {
+            return error.HashNotFound;
+        }
+        return try self.getProofByIndex(allocator, item.?);
+    }
+
 
     /// Write the JSON representation of the merkle tree to any writer.
     /// Caller owns the writer (file, fixed buffer, ArrayList writer, etc.).
@@ -266,7 +301,6 @@ const StandardMerkleTreeData = struct {
             for (0..tree_nodes.items.len) |i| {
                 allocator.free(tree_nodes.items[i]);
             }
-            tree_nodes.deinit(allocator);
         }
         for(tree.tree.tree_nodes) |node| {
             const node_hex = try hashToHex(allocator, node);
@@ -549,7 +583,7 @@ test "to hashed values json" {
     var hashed_value_json = try HashedValuesJson.fromHashedValues(testing.allocator, tree.values[0]);
     defer hashed_value_json.deinit(testing.allocator);
 
-    try testing.expectEqual(0, hashed_value_json.value_index);
+    try testing.expectEqual(8, hashed_value_json.value_index);
 }
 
 test "merkle tree data" {
@@ -601,7 +635,7 @@ test "get proof" {
     var tree = try buildTreeFromCharacters(testing.allocator, s);
     defer tree.deinit();
 
-    var proof = try tree.getProofByIndex(testing.allocator, 6);
+    var proof = try tree.getProofByIndex(testing.allocator, 0);
     defer {
         for (0..proof.len) |i| {
             testing.allocator.free(proof[i]);
@@ -609,16 +643,52 @@ test "get proof" {
         testing.allocator.free(proof);
     }
 
-    try testing.expectEqual(2, proof.len);
-
     const expected_proof = [_][]const u8{
-        "eba909cf4bb90c6922771d7f126ad0fd11dfde93f3937a196274e1ac20fd2f5b",
-        "52426e0f1f65ff7e209a13b8c29cffe82e3acaf3dad0a9b9088f3b9a61a929c3",
+        "9cf5a63718145ba968a01c1d557020181c5b252f665cf7386d370eddb176517b",
+        "965b92c6cf08303cc4feb7f3e0819c436c2cec17c6f0688a6af139c9a368707c",
+        "fd3cf45654e88d1cc5d663578c82c76f4b5e3826bacaa1216441443504538f51",
     };
 
     for (expected_proof, proof) |ep, p| {
         const p_hex = try hashToHex(testing.allocator, p);
         defer testing.allocator.free(p_hex);
         try testing.expectEqualStrings(ep[0..], p_hex[0..]);
+    }
+}
+
+fn freeProof(proof: [][]const u8) void {
+     for (0..proof.len) |i| {
+         testing.allocator.free(proof[i]);
+     }
+     testing.allocator.free(proof);
+ }
+
+test "get proof by hash" {
+    const s = "abcdef";
+    var tree = try buildTreeFromCharacters(testing.allocator, s);
+    defer tree.deinit();
+
+    var values = std.ArrayList([]u8){};
+    defer {
+        for (0..values.items.len) |i| {
+            testing.allocator.free(values.items[i]);
+        }
+        values.deinit(testing.allocator);
+    }
+    for(s) |c| {
+        const y = try testing.allocator.alloc(u8, 1);
+        y[0] = c;
+        try values.append(testing.allocator, y);
+    }
+
+    for (tree.values, 0..) |v, i| {
+        const proof1 = try tree.getProofByIndex(testing.allocator, i);
+        defer freeProof(proof1);
+        const hash_hex = try hashToHex(testing.allocator, v.hash);
+        defer testing.allocator.free(hash_hex);
+        const proof2 = try tree.getProofByHash(testing.allocator, hash_hex);
+        defer freeProof(proof2);
+
+        try testing.expectEqualDeep(proof1, proof2);
     }
 }

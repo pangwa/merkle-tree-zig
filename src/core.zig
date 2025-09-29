@@ -130,6 +130,32 @@ pub const MerkleTree = struct {
         };
     }
 
+    // from a list of nodes directly
+    // node is encoded as hex string
+    pub fn fromNodes(allocator: std.mem.Allocator, root: [] const u8, nodes: [][]const u8) !Self {
+        var tree_nodes = std.ArrayList([]const u8){};
+        defer tree_nodes.deinit(allocator);
+        errdefer {
+            for (0..tree_nodes.items.len) |i| {
+                allocator.free(tree_nodes.items[i]);
+            }
+            tree_nodes.deinit(allocator);
+        }
+
+        for (nodes) |node| {
+            const node_copy = try hexToHash(allocator, node);
+            try tree_nodes.append(allocator, node_copy);
+        }
+
+        const root_copy = try hexToHash(allocator, root);
+
+        return Self{
+            .allocator = allocator,
+            .root = root_copy,
+            .tree_nodes = try allocator.dupe([]const u8, tree_nodes.items),
+        };
+    }
+
     /// Get the root hash
     pub fn getRoot(self: *const Self) []const u8 {
         return self.root;

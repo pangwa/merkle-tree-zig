@@ -8,8 +8,10 @@ const encodeAbiParametersValues = zabi.encoding.abi_encoding.encodeAbiParameters
 const AbiEncodedValues = zabi.encoding.abi_encoding.AbiEncodedValues;
 const utils = zabi.utils.utils;
 const hashToHex = core.hashToHex;
+const hashToHexSlice = core.hashToHexSlice;
 const hexToHash = core.hexToHash;
 const TokensTag = zabi.human_readable.TokensTag;
+const StringHashMap = std.StringHashMap;
 
 const LeafValue = []const u8;
 
@@ -49,11 +51,14 @@ pub const StandardMerkleTree = struct {
     tree: core.MerkleTree,
     values: []HashedValues,
     leaf_encoding: [][] const u8,
+    hash_lookup: StringHashMap(usize),
+    hash_keys: std.ArrayList([]const u8),
     allocator: std.mem.Allocator,
 
     const Self = @This();
 
     pub fn deinit(self: *Self) void {
+        self.hash_lookup.deinit();
         self.allocator.free(self.format);
         self.tree.deinit();
 
@@ -66,6 +71,10 @@ pub const StandardMerkleTree = struct {
         }
         self.allocator.free(self.leaf_encoding);
         self.allocator.free(self.values);
+        for(0..self.hash_keys.items.len) |i| {
+            self.allocator.free(self.hash_keys.items[i]);
+        }
+        self.hash_keys.deinit(self.allocator);
     }
 
     // construct the tree from given leaves and leaf encoding
@@ -84,11 +93,26 @@ pub const StandardMerkleTree = struct {
             values.deinit(allocator);
         }
 
+        var hash_lookup = StringHashMap(usize).init(allocator);
+        errdefer hash_lookup.deinit();
+
+        var hash_keys = std.ArrayList([]const u8){};
+        for(values.items) |v| {
+            const hex = try hashToHex(allocator, v.hash);
+            {
+                errdefer allocator.free(hex);
+                try hash_keys.append(allocator, hex);
+            }
+            try hash_lookup.put(hex, v.value_index);
+        }
+
          return . {
             .allocator = allocator,
             .format = try allocator.dupe(u8, "standard-v1"),
             .tree = tree.*,
             .values = try allocator.dupe(HashedValues, values.items),
+            .hash_lookup = hash_lookup,
+            .hash_keys = hash_keys,
             .leaf_encoding = leaf_encoding,
         };
     }

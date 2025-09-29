@@ -244,15 +244,19 @@ pub fn hashPair(allocator: std.mem.Allocator, left: []const u8, right: []const u
 
 /// Convert hash bytes to hex string for display
 pub fn hashToHex(allocator: std.mem.Allocator, hash: []const u8) ![]const u8 {
-    const hex_chars = "0123456789abcdef";
     var hex_string = try allocator.alloc(u8, hash.len * 2);
-
-    for (hash, 0..) |byte, i| {
-        hex_string[i * 2] = hex_chars[byte >> 4];
-        hex_string[i * 2 + 1] = hex_chars[byte & 0xf];
-    }
+    hashToHexSlice(hash, &hex_string);
 
     return hex_string;
+}
+
+pub fn hashToHexSlice(hash: []const u8, out: *[]u8) void {
+    const hex_chars = "0123456789abcdef";
+
+    for (hash, 0..) |byte, i| {
+        out.*[i * 2] = hex_chars[byte >> 4];
+        out.*[i * 2 + 1] = hex_chars[byte & 0xf];
+    }
 }
 
 pub fn hexToHash(allocator: std.mem.Allocator, hex: []const u8) ![]const u8 {

@@ -135,36 +135,105 @@ pub const StandardMerkleTree = struct {
         return self.tree.tree_nodes;
     }
 
-    pub fn dumpJson(self: *Self, allocator: std.mem.Allocator, writer: *std.Io.Writer) !void {
-        const r = try hashToHex(allocator, self.root());
-        defer allocator.free(r);
+    /// Write the JSON representation of the merkle tree to any writer.
+    /// Caller owns the writer (file, fixed buffer, ArrayList writer, etc.).
+    /// No implicit file creation is performed here.
+    pub fn dumpJson(self: *Self, allocator: std.mem.Allocator, writer: anytype) !void {
+        // Build a transient representation suitable for std.json formatting
+        var tree_data = try StandardMerkleTreeData.from(allocator, self);
+        defer tree_data.deinit(allocator);
 
-        var renderedValues = try renderHashedValues(allocator, self.values.items);
-        defer {
-            for (0..renderedValues.items.len) |i| {
-                renderedValues.items[i].deinit(allocator);
-            }
-            renderedValues.deinit(allocator);
-        }
-
-        const fmt = std.json.fmt(.{
-            .format = self.format,
-            .values = renderedValues.items,
-            .leaf_encoding = self.leaf_encoding,
-            .root = r,
-        }, .{ .whitespace = .indent_2 });
-          // Create or open a file for writing
-        var file = try std.fs.cwd().createFile("output.json", .{});
-        defer file.close();
-        // var buffer: [1024]u8 = undefined;
-        // var writer = file.writer(&buffer);
+        const fmt = std.json.fmt(tree_data, .{ .whitespace = .indent_2 });
         try fmt.format(writer);
-        try writer.flush();
+        // Most writers (FixedBufferStream, ArrayList) don't require an explicit flush.
     }
 };
 
-fn renderHashedValues(allocator: std.mem.Allocator, hv: []HashedValues) !std.ArrayList(HashedValues){
-    var renderedValues = std.ArrayList(HashedValues){};
+
+const StandardMerkleTreeData = struct {
+    format: []u8,
+    values: []HashedValuesJson,
+    leaf_encoding: [][]const u8,
+    root: []const u8,
+
+    const Self = @This();
+
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        allocator.free(self.format);
+
+        for(0..self.values.len) |i| {
+            self.values[i].deinit(allocator);
+        }
+        allocator.free(self.values);
+
+        for (0..self.leaf_encoding.len) |i| {
+            allocator.free(self.leaf_encoding[i]);
+        }
+        allocator.free(self.leaf_encoding);
+        allocator.free(self.root);
+    }
+
+    pub fn from(allocator: std.mem.Allocator, tree: *StandardMerkleTree) !Self {
+        const format = try allocator.dupe(u8, tree.format);
+        const root = try hashToHex(allocator, tree.root());
+        defer allocator.free(root);
+
+        var values = try renderHashedValues(allocator, tree.values.items);
+        defer values.deinit(allocator);
+        errdefer {
+            for (0..values.items.len) |i| {
+                values.items[i].deinit(allocator);
+            }
+        }
+
+        const leaf_encoding = try allocator.alloc([]const u8, tree.leaf_encoding.len);
+        for (tree.leaf_encoding, 0..) |le, i| {
+            leaf_encoding[i] = try allocator.dupe(u8, le);
+        }
+
+        return Self{
+            .format = format,
+            .values = try allocator.dupe(HashedValuesJson, values.items),
+            .leaf_encoding = leaf_encoding,
+            .root = try allocator.dupe(u8, root),
+        };
+    }
+};
+
+// JSON representation of a hashed value
+const HashedValuesJson = struct {
+    value: [][]const u8,
+    value_index: usize,
+    hash: []const u8,
+
+    const Self = @This();
+
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        for (0..self.value.len) |i| {
+            allocator.free(self.value[i]);
+        }
+        allocator.free(self.value);
+        allocator.free(self.hash);
+    }
+
+    pub fn fromHashedValues(allocator: std.mem.Allocator, hv: HashedValues) !Self {
+        const value = try dupeNestedSlice(allocator, hv.value);
+        errdefer {
+            for (value) |v| allocator.free(v);
+            allocator.free(value);
+        }
+        const hash = try hashToHex(allocator, hv.hash);
+
+        return Self{
+            .value = value,
+            .hash = hash,
+            .value_index = hv.value_index,
+        };
+    }
+};
+
+fn renderHashedValues(allocator: std.mem.Allocator, hv: []HashedValues) !std.ArrayList(HashedValuesJson){
+    var renderedValues = std.ArrayList(HashedValuesJson){};
     errdefer {
         for (0..renderedValues.items.len) |i| {
             renderedValues.items[i].deinit(allocator);
@@ -173,13 +242,9 @@ fn renderHashedValues(allocator: std.mem.Allocator, hv: []HashedValues) !std.Arr
     }
 
     for (hv) |h| {
-        var item = try h.dupe(allocator);
-        errdefer item.deinit(allocator);
-        const hash = try hashToHex(allocator, item.hash);
-        allocator.free(item.hash);
-        item.hash = hash;
-
-        try renderedValues.append(allocator, item);
+        var hashed_value = try HashedValuesJson.fromHashedValues(allocator, h);
+        errdefer hashed_value.deinit(allocator);
+        try renderedValues.append(allocator, hashed_value);
     }
     return renderedValues;
 }
@@ -345,4 +410,39 @@ test "from characters" {
         defer testing.allocator.free(tn_hex);
         try testing.expectEqualStrings(en[0..], tn_hex[0..]);
     }
+}
+
+test "to hashed values json" {
+    const s = "abcdef";
+    var tree = try buildTreeFromCharacters(testing.allocator, s);
+    defer tree.deinit();
+
+    var hashed_value_json = try HashedValuesJson.fromHashedValues(testing.allocator, tree.values.items[0]);
+    defer hashed_value_json.deinit(testing.allocator);
+
+    try testing.expectEqual(0, hashed_value_json.value_index);
+}
+
+test "merkle tree data" {
+    const s = "abcdef";
+    var tree = try buildTreeFromCharacters(testing.allocator, s);
+    defer tree.deinit();
+
+    var tree_data = try StandardMerkleTreeData.from(testing.allocator, &tree);
+    defer tree_data.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("6deb52b5da8fd108f79fab00341f38d2587896634c646ee52e49f845680a70c8", tree_data.root);
+
+}
+
+test "to_json" {
+    const s = "abcdef";
+    var tree = try buildTreeFromCharacters(testing.allocator, s);
+    defer tree.deinit();
+
+    var buffer: [2048]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buffer);
+
+    try tree.dumpJson(testing.allocator, &w);
+    try testing.expectEqual('{', buffer[0]);
 }

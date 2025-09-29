@@ -47,7 +47,7 @@ const HashedValues = struct {
 pub const StandardMerkleTree = struct {
     format: []u8,
     tree: core.MerkleTree,
-    values: std.ArrayList(HashedValues),
+    values: []HashedValues,
     leaf_encoding: [][] const u8,
     allocator: std.mem.Allocator,
 
@@ -57,20 +57,21 @@ pub const StandardMerkleTree = struct {
         self.allocator.free(self.format);
         self.tree.deinit();
 
-        for(0..self.values.items.len) |i| {
-            self.values.items[i].deinit(self.allocator);
+        for(0..self.values.len) |i| {
+            self.values[i].deinit(self.allocator);
         }
 
         for (0..self.leaf_encoding.len) |i| {
             self.allocator.free(self.leaf_encoding[i]);
         }
         self.allocator.free(self.leaf_encoding);
-        self.values.deinit(self.allocator);
+        self.allocator.free(self.values);
     }
 
     // construct the tree from given leaves and leaf encoding
     // taking the ownership of the tree, values and leaf_encoding
     pub fn init(allocator: std.mem.Allocator, tree: *core.MerkleTree, values: *std.ArrayList(HashedValues), leaf_encoding: [][]const u8) !Self {
+        defer values.deinit(allocator);
         errdefer {
             tree.deinit();
             for (0..leaf_encoding.len) |i| {
@@ -87,7 +88,7 @@ pub const StandardMerkleTree = struct {
             .allocator = allocator,
             .format = try allocator.dupe(u8, "standard-v1"),
             .tree = tree.*,
-            .values = values.*,
+            .values = try allocator.dupe(HashedValues, values.items),
             .leaf_encoding = leaf_encoding,
         };
     }
@@ -169,7 +170,7 @@ pub const StandardMerkleTree = struct {
 
         const fmt = std.json.fmt(tree_data, .{ .whitespace = .indent_2 });
         try fmt.format(writer);
-        // Most writers (FixedBufferStream, ArrayList) don't require an explicit flush.
+        try writer.flush();
     }
 
     pub fn loadJson(allocator: std.mem.Allocator, reader: *std.Io.Reader) !Self {
@@ -187,7 +188,7 @@ pub const StandardMerkleTree = struct {
 const StandardMerkleTreeData = struct {
     format: []u8,
     values: []HashedValuesJson,
-    tree: std.ArrayList([]const u8),
+    tree: [][]const u8,
     leaf_encoding: [][]const u8,
     root: []const u8,
 
@@ -207,10 +208,10 @@ const StandardMerkleTreeData = struct {
         allocator.free(self.leaf_encoding);
         allocator.free(self.root);
 
-        for (0..self.tree.items.len) |i| {
-            allocator.free(self.tree.items[i]);
+        for (0..self.tree.len) |i| {
+            allocator.free(self.tree[i]);
         }
-        self.tree.deinit(allocator);
+        allocator.free(self.tree);
     }
 
     pub fn from(allocator: std.mem.Allocator, tree: *StandardMerkleTree) !Self {
@@ -218,7 +219,7 @@ const StandardMerkleTreeData = struct {
         const root = try hashToHex(allocator, tree.root());
         defer allocator.free(root);
 
-        var values = try renderHashedValues(allocator, tree.values.items);
+        var values = try renderHashedValues(allocator, tree.values);
         defer values.deinit(allocator);
         errdefer {
             for (0..values.items.len) |i| {
@@ -232,6 +233,7 @@ const StandardMerkleTreeData = struct {
         }
 
         var tree_nodes = std.ArrayList([]const u8){};
+        defer tree_nodes.deinit(allocator);
         errdefer {
             for (0..tree_nodes.items.len) |i| {
                 allocator.free(tree_nodes.items[i]);
@@ -246,14 +248,14 @@ const StandardMerkleTreeData = struct {
         return Self{
             .format = format,
             .values = try allocator.dupe(HashedValuesJson, values.items),
-            .tree = tree_nodes,
+            .tree = try allocator.dupe([]const u8, tree_nodes.items),
             .leaf_encoding = leaf_encoding,
             .root = try allocator.dupe(u8, root),
         };
     }
 
     pub fn to(self: *const Self, allocator: std.mem.Allocator) !StandardMerkleTree {
-        var tree = try core.MerkleTree.fromNodes(allocator, self.root, self.tree.items);
+        var tree = try core.MerkleTree.fromNodes(allocator, self.root, self.tree);
         errdefer tree.deinit();
 
         var values_array = std.ArrayList(HashedValues){};
@@ -506,7 +508,7 @@ test "to hashed values json" {
     var tree = try buildTreeFromCharacters(testing.allocator, s);
     defer tree.deinit();
 
-    var hashed_value_json = try HashedValuesJson.fromHashedValues(testing.allocator, tree.values.items[0]);
+    var hashed_value_json = try HashedValuesJson.fromHashedValues(testing.allocator, tree.values[0]);
     defer hashed_value_json.deinit(testing.allocator);
 
     try testing.expectEqual(0, hashed_value_json.value_index);
@@ -553,5 +555,5 @@ test "load_json" {
     defer tree2.deinit();
 
     try testing.expectEqualSlices(u8, tree.root(), tree2.root());
-    try testing.expectEqual(tree.values.items.len, tree2.values.items.len);
+    try testing.expectEqual(tree.values.len, tree2.values.len);
 }
